@@ -1,0 +1,615 @@
+---
+title: "Reproducible analysis of TGP"
+author: "Danfeng Chen"
+date: "`r Sys.Date()`"
+output: 
+ rmdformats::robobook:
+    lightbox: true
+    code_folding: hide
+    self_contained: yes
+    thumbnails: false
+    use_bookdown: true
+    fig_caption: yes
+    keep_md: false
+---
+
+```{r load_packages, echo=TRUE, message=FALSE, warning=FALSE, class.source='fold-show'}
+library(knitr)
+library(genio)
+library(ggtree)
+library(popkin)
+library(BEDMatrix)
+library(superadmixture)
+library(tidyverse)
+
+# for plotting
+library(ggplot2)
+library(grid)
+library(gridGraphics)
+library(ggplotify)
+library(ggpubr)
+library(patchwork)
+library(latex2exp)
+```
+
+```{r status, echo=FALSE, eval=TRUE}
+preprocessing                <- FALSE
+kinship_os_estimation        <- FALSE
+admix_props_estimation       <- FALSE
+k_antepops_selection         <- FALSE
+genotype_simulation          <- FALSE
+coanc_antepops_estimation    <- TRUE
+coanc_antepops_visualization <- TRUE
+```
+
+# Data Preprocessing
+
+In this document, we demonstrate our procedures for analysis of 1000 Genomes phase 3. The raw TGP phase 3 is available at the [FTP site](https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/), attributed to [Byrska-Bishop et al. (2022)](https://doi.org/10.1016/j.cell.2022.08.004). Here we start with the assembled version of TGP, provided by the [PLINK](https://www.cog-genomics.org/plink/2.0/resources). PLINK hosts the assembled data at the following dropbox link: 
+
++ `.pgen` file: https://www.dropbox.com/s/j72j6uciq5zuzii/all_hg38.pgen.zst?dl=1
++ `.pvar` file: https://www.dropbox.com/s/vx09262b4k1kszy/all_hg38.pvar.zst?dl=1
++ `.psam` file: https://www.dropbox.com/s/2e87z6nc4qexjjm/hg38_corrected.psam?dl=1
+
+The associated annotations can be found at the FTP site:
+
++ Pedigree information: http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/1kGP.3202_samples.pedigree_info.txt
++ Population information: http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/20130606_g1k_3202_samples_ped_population.txt
+
+We use `PLINK2` and `zstd` for data preprocessing. The `PLINK2` software can be downloaded from this [webpage](https://www.cog-genomics.org/plink/2.0/).  The `ztsd` is hosted at the [github](https://github.com/facebook/zstd.git), and can downloaded and installed through the following commands. 
+
+```{bash install_zstd, eval=preprocessing, warning=FALSE, results="hide", class.source='fold-show'}
+git clone https://github.com/facebook/zstd.git
+cd zstd
+make install
+```
+
+We download and unzip the assembled TGP data from the dropbox stated above. We create a folder called `rawdata` to host the downloaded raw data and pre-processed data.
+
+```{bash download_assembled_tgp, eval=preprocessing, warning=FALSE, results="hide", class.source='fold-show'}
+mkdir -p rawdata && cd $_
+
+zstd=<PATH_TO_ZSTD_EXECUTABLE>
+
+## download `.pgen` file
+wget "https://www.dropbox.com/s/j72j6uciq5zuzii/all_hg38.pgen.zst?dl=1"
+mv "all_hg38.pgen.zst?dl=1" "all_phases3.pgen.zst"
+./$zstd -d all_phases3.pgen.zst
+rm all_phases3.pgen.zst
+
+## download `.pvar` file
+wget "https://www.dropbox.com/s/vx09262b4k1kszy/all_hg38.pvar.zst?dl=1"
+mv "all_hg38.pvar.zst?dl=1" "all_phases3.pvar.zst"
+
+## download `.psam` file
+wget "https://www.dropbox.com/s/2e87z6nc4qexjjm/hg38_corrected.psam?dl=1"
+mv "hg38_corrected.psam?dl=1" "all_phases3.psam"
+
+## download annotations
+wget "http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/1kGP.3202_samples.pedigree_info.txt"
+wget "http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/20130606_g1k_3202_samples_ped_population.txt"
+```
+
+This step serves to assign unique variant IDs to each locus.
+
+```{bash vid_assignment, eval=preprocessing, warning=FALSE, results="hide", class.source='fold-show'}
+PLINK2=<PATH_TO_PLINK2_EXECUTABLE>
+
+./$PLINK2 \
+    --pfile all_phases3 vzs \
+    --set-missing-var-ids '@:#' \
+    --allow-extra-chr \
+    --make-just-pvar zs \
+    --out all_phases3_uniq
+
+mv all_phases3.pvar.zst all_phases3.orig.pvar.zst
+mv all_phases3_uniq.pvar.zst all_phases3.pvar.zst
+rm all_phases3_uniq.log
+rm all_phases3.orig.pvar.zst
+```
+
+This step serves to preserve loci that:
+
+1. are autosomal, biallelic SNPs (model assumption)
+2. are variant in the Yoruba samples (code YRI), and
+3. have unique IDs
+
+```{bash vafilters, eval=preprocessing, warning=FALSE, results="hide", class.source='fold-show'}
+./$PLINK2 \
+    --pfile all_phases3 vzs \
+    --rm-dup exclude-all \
+    --allow-extra-chr \
+    --write-snplist zs \
+    --out nodups
+
+./$PLINK2 \
+    --pfile all_phases3 vzs \
+    --extract nodups.snplist.zst \
+    --keep-founders \
+    --autosome \
+    --max-alleles 2 \
+    --allow-extra-chr \
+    --mac 1 \
+    --make-bed \
+    --out all_phases3
+    
+rm nodups.log
+rm nodups.snplist.zst
+```
+
+Then we add subpopulation labels to FAM files.
+
+```{bash add_labels, eval=preprocessing, warning=FALSE, results="hide", class.source='fold-show'}
+awk -F" " '{
+  if (NR == FNR) population[$1]=$6;
+  else print population[$2],$2,$3,$4,$5,$6;
+}' all_phases3.psam all_phases3.fam > all_phases3.fam.NEW
+
+mv all_phases3.fam.NEW all_phases3.fam
+```
+
+This step serves to preserve loci that:
+
+1. have MAF >= 0.05
+2. are in approximate linkage equilibrium with each other
+
+```{bash vafilters2, eval=preprocessing, warning=FALSE, results="hide", class.source='fold-show'}
+./$PLINK2 \
+    --bfile all_phases3 \
+    --make-bed \
+    --out all_phases3_maf_0.05 \
+    --maf 0.05
+    
+## this command determines the loci to keep or exclude
+./$PLINK2 --bfile all_phases3_maf_0.05 --indep-pairwise 1000kb 0.3 --out all_phases3_maf_0.05
+  
+## this actually filters the data
+./$PLINK2 \
+    --bfile all_phases3_maf_0.05 \
+    --extract all_phases3_maf_0.05.prune.in \
+    --make-bed \
+    --out all_phases3_final
+    
+#rm all_phases3.{bed,bim,fam}
+#rm all_phases3_maf_0.05.{bed,bim,fam,log,prune.in,prune.out}
+#rm all_phases3_final.log
+```
+
+# Estimating individual-level coancestry 
+
+In the following sections, the intermediate data will be stored at the `rdata` folder. 
+
+```{r import_genotypes, eval=kinship_os_estimation, warning=FALSE, message=FALSE, class.source='fold-show'}
+## load genotypes, FAM & info
+X    <- BEDMatrix::BEDMatrix("rawdata/all_phases3_final", simple_names = TRUE)
+fam  <- genio::read_fam( "rawdata/all_phases3_final")
+info <- readr::read_table("rawdata/20130606_g1k_3202_samples_ped_population.txt", col_types = 'ccdddcc')
+```
+
+Here we demonstrate how to estimate the individual-level coancestry $\boldsymbol{\Theta}$ according to the Ochoa-Storey (OS) method by `popkin` package. So here we only presents the codes but not running them. We provide the pre-computed coancestry at `rdata/coanc_os.rda`. It should noted that the `popkin` function returns the kinship coefficients instead of the coancestry coefficients. Therefore, we use the `inbr_diag` function in the `popkin` package to map kinship coefficients $\phi_{jk}$'s to coancestry coefficients $\theta_{jk}$'s:
+
+\[
+\theta_{jk} = 
+\begin{cases}
+2\phi_{jk} - 1 & j = k \\
+\phi_{jk} &j \neq k
+\end{cases}.
+\]
+
+```{r estimate_indiv_coanc_os, eval=kinship_os_estimation, warning=FALSE, message=FALSE, class.source='fold-show'}
+## reorder individuals by the sub-population order
+subpop_order <- c('AFR', 'SAS', 'EUR', 'EAS', 'AMR')
+fam <- fam %>% dplyr::left_join(info, by = c("id" = "SampleID"))
+
+index        <- order(factor(fam$Superpopulation, level = subpop_order))
+fam          <- fam[index, ]
+X            <- X[index, ]
+
+## estimate kinship
+kinship_os <- popkin::popkin(t(X), subpops = fam$Population)
+coanc_os <- popkin::inbr_diag(kinship_os)
+coanc_os <- ifelse(coanc_os < 0, 0, coanc_os)
+save(coanc_os,   file = "rdata/coanc_os.rda")
+save(fam,        file = "rdata/fam.rda")
+save(X,          file = "rdata/X.rda")
+```
+
+We can visualize the individual-level coancestry of the simulated data using `plot_popkin` function in the `popkin` function. We use the following helper function `plot_colors_subpops` to label the sub-populations.
+
+```{r, eval=TRUE, message=TRUE, warning=FALSE, class.source='fold-show'}
+plot_colors_subpops <- function(pops, srt = 0, cex = 0.6, y = FALSE) {
+  n <- length(pops)
+  k <- unique(pops)
+  pops <- factor(pops, levels = unique(pops))
+  xintercept <- cumsum(table(pops))
+  breaks <- xintercept - 0.5 * as.numeric(table(pops))
+  if (y) {
+    plot(NULL, xlim = c(0, 1), ylim = c(1, n), axes = FALSE, ann = FALSE, xaxs = "i", yaxs = "i")
+    text(1, n-rev(breaks), rev(unique(pops)), cex = cex, srt = srt, xpd = TRUE, adj = c(1, 0.5))
+  } else {
+    plot(NULL, xlim = c(1, n), ylim = c(0, 1), axes = FALSE, ann = FALSE, xaxs = "i", yaxs = "i")
+    text(breaks, 1, unique(pops), cex = cex, srt = srt, xpd = TRUE, adj = c(1, 0.5))
+  }
+}
+```
+
+```{r plot_indiv_coanc, eval=TRUE, message=TRUE, warning=FALSE, fig.height=5, fig.width=6, fig.align='center', class.source='fold-show'}
+load("rdata/coanc_os.rda")
+load("rdata/fam.rda")
+
+par(mar = c(0, 0, 0, 0) + 0.2)
+layout(rbind(c(3, 1, 2), c(3, 1, 5), c(0, 4, 0)), widths = c(0.2, 1, 0.2), heights = c(0.5, 0.5, 0.3))
+
+popkin::plot_popkin(kinship = coanc_os, layout_add = FALSE, leg_cex = 0.8, labs_text = FALSE, labs_lwd = 0.1, labs = fam$Superpopulation, ylab = '', leg_title = "Coancestry")
+
+par(mar = c(0.2, 0, 0.2, 0))
+plot_colors_subpops(fam$Superpopulation, y = TRUE, cex = 0.8)
+mtext('Individuals', side = 2, line = 0.5, xpd = NA, cex = 0.8)
+par(mar = c(0, 0.2, 0, 0.2))
+plot_colors_subpops(fam$Superpopulation, srt = 90, cex = 0.8)
+```
+
+# Estimating admixture proportions 
+
+The following chunk of the codes estimates the admixture proportions $\boldsymbol{Q}$ from genotypes. We first estimate the individual specific allele frequencies $\boldsymbol{\Pi}$ using the `est_p_indiv` function in the `superadmixture` package. We then estimate $\boldsymbol{Q}$ by decomposing $\boldsymbol{\Pi}$ with `factor_p_indiv` function in the `superadmixture` package. It takes hours to run the following codes, so we're not running here.
+
+```{r estimate_admix_props, eval=admix_props_estimation, message=TRUE, warning=FALSE, class.source='fold-show'}
+for (k_antepops in 2:15) {
+    # estimate individual-specific allele frequencies
+    obj <- est_p_indiv(X, k_antepops, loci_on_cols = TRUE)
+    p_indiv <- obj$p_indiv
+    rowspace <- obj$rowspace
+    
+    # estimate admix_props by decomposing individual-specific allele frequencies
+    obj <- factor_p_indiv(p_indiv = p_indiv,
+                          rowspace = rowspace,
+                          k_antepops = k_antepops,
+                          init_method = "rowspace",
+                          verbose = TRUE,
+                          max_iters = 1000,
+                          tol = 1e-4)
+    
+    # save admixture proportions 
+    Q_hat <- obj$Q_hat
+    dir.create(file.path("rdata", "Q_hat"), showWarnings = FALSE)
+    save(Q_hat, file = paste0("rdata/Q_hat/", k_antepops, ".rda"))
+}
+```
+
+# Selecting number of antecedent populations
+
+The following chunk of the codes calculates the p-values of structured Hardy-Weinberg Equilibrium test (sHWE) and plots the relationship between the negative entropy of the sHWE p-values and $K$. It takes hours to run the following codes, so we're not running here.
+
+```{r sHWE, eval=k_antepops_selection, message=TRUE, warning=FALSE, class.source='fold-show'}
+for (k_antepops in 2:15) {
+    # estimate `rowspace`, an input for sHWE function
+   rowspace <- est_p_indiv(X, k_antepops, loci_on_cols = TRUE, rowspace_only = TRUE)
+   
+   # perform sHWE test
+   pvals <- sHWE(X, k_antepops, loci_on_cols = TRUE, rowspace = rowspace) 
+   save(pvals, file = paste0("rdata/sHWE/", k_antepops, ".rda"))
+}
+
+neg_entropy <- c()
+for (k_antepops in 2:15) {
+    load(paste0("rdata/sHWE/", k_antepops, ".rda"))
+    neg_entropy <- c(neg_entropy, calc_neg_entropy(pvals))
+}
+save(neg_entropy, file = "rdata/neg_entropy.rda")
+```
+
+We visualize the relationship between $K$ and the negative entropy of sHWE p-values.
+
+```{r plot_entropy_against_k,, eval=TRUE, message=TRUE, warning=FALSE, fig.width=5, fig.height=5, fig.align='center', class.source='fold-show'}
+load("rdata/neg_entropy.rda")
+plot(2:15, neg_entropy, ylim = c(-2.2, -1.85), xlab = "", ylab = "", type = "b", family="Times New Roman")
+mtext(latex2exp::TeX(r"(\textit{$K$})"), side = 1, col = "black", line = 2.5, family="Times New Roman", pch = 10)
+mtext("Negative Entropy", side = 2, line = 2.5, col = "black",  family="Times New Roman")
+```
+
+We select $K = 5$ according to this plot. 
+
+# Estimating the coancestry among antecedent populations 
+
+After obtaining individual-level coancestry $\boldsymbol{\Theta}$ and admixture proportions $\boldsymbol{Q}$, we can use the function `est_coanc` to estimate population coancestry under the super admixture and standard admixture.
+
+```{r pop_coanc_estimation, eval=coanc_antepops_estimation, class.source='fold-show'}
+load("rdata/coanc_os.rda")
+load("rdata/Q_hat/5.rda")
+
+coanc_antepops_sup <- est_coanc(coanc_os, Q_hat, model = "super")
+coanc_antepops_std <- est_coanc(coanc_os, Q_hat, model = "standard")
+```
+
+We then compute the corresponding individual-level coancestry under the super admixture and standard admixture.
+
+```{r indiv_coanc_estimation_super_std, eval=coanc_antepops_estimation, class.source='fold-show'}
+coanc_sup <- t(Q_hat) %*% coanc_antepops_sup %*% Q_hat
+coanc_std <- t(Q_hat) %*% coanc_antepops_std %*% Q_hat
+```
+
+# Visualization
+
+We can visualize the coancestry of antecedent populations `coanc_antepops_sup` and admixture proportions `Q_hat` using the helper functions `get_seq_colors`, `plot_tree`, `barplot_admix` and `heatmap_coanc_antepops` we provide. 
+
+```{r fit_tree, eval=TRUE, class.source='fold-show', fig.align='center', fig.height=3, fig.width=7}
+# reorder antecedent populations in the ascending order of coancestry
+k_antepops   <- 5
+index        <- order(diag(coanc_antepops_sup))
+Q_hat        <- Q_hat[index, ]
+coanc_antepops_sup <- coanc_antepops_sup[index, index]
+
+# label antecedent populations
+colnames(coanc_antepops_sup) <- rownames(coanc_antepops_sup) <- paste0("S", 1:k_antepops)
+
+# fit tree
+tree <- bnpsd::fit_tree(round(coanc_antepops_sup, 6))
+
+# plot an uncolorred tree
+plot_tree(tree)
+```
+
+Based on the topology of the tree, we decide to color $S_1$ by blue, $S_3$ by green, $S_2$, $S_4$ and $S_5$ by light red, medium red and dark red respectively. We can pick a sequence of colors by using the `get_seq_colors()` function and its returned value can be used to specify the coloring scheme for `plot_tree()` function.
+
+```{r draw_colorred_tree, eval=coanc_antepops_visualization, warning=FALSE, message=FALSE, class.source='fold-show', fig.align='center', fig.height=3, fig.width=7}
+colors <- c(get_seq_colors("Blues", 1), get_seq_colors("Greens", 1), get_seq_colors("Reds", 3))
+names(colors) <- paste0("S", c(1, 3, 2, 4, 5))
+fig_tree <- plot_tree(tree, colors = colors)
+fig_tree
+```
+
+We can visualize admixture proportions `Q_hat` using the `barplot_admix` function.
+
+```{r plot_admix, eval=coanc_antepops_visualization, warning=FALSE, message=FALSE, class.source='fold-show', fig.align='center', fig.height=3, fig.width=8}
+subpop_order <- c('AFR', 'EUR', 'SAS', 'EAS', 'AMR')
+index        <- order(factor(fam$Superpopulation, level = subpop_order))
+fig_admix <- barplot_admix(Q_hat[, index], colors = colors, subpops = fam$Superpopulation[index])
+fig_admix
+```
+
+We also can visualize the coancestry among antecedent populations by `heatmap_coanc_antepops`. We define the helper function `heatmap_coanc_antepops_wrapper` that returns a ggplot object of the heatmap. 
+
+```{r, eval=coanc_antepops_visualization, message=FALSE, warning=FALSE, class.source='fold-show'}
+heatmap_coanc_antepops_wrapper <- function(coanc_antepops, tl.cex = 1.3, cl.cex = 1, tl.offset = 0.6) {
+  superadmixture::heatmap_coanc_antepops(coanc_antepops, tl.cex = tl.cex, cl.cex = cl.cex, tl.offset = tl.offset)
+  grab_grob <- function(){
+    gridGraphics::grid.echo()
+    grid::grid.grab()
+  }
+  p <- grab_grob()
+ 
+ # save correlation matrix colors to a vector, then make coloured matrix grob transparent
+ matrix.colors <- grid::getGrob(p, grid::gPath("square"), grep = TRUE)[["gp"]][["fill"]]
+ p <- grid::editGrob(p, grid::gPath("square"), grep = TRUE, gp = grid::gpar(col = NA, fill = NA))
+
+ # apply the saved colours to the underlying matrix grob
+ p <- grid::editGrob(p, grid::gPath("symbols-rect-1"), grep = TRUE, gp = grid::gpar(fill = matrix.colors))
+
+ # convert the background fill from white to transparent, while we are at it
+ p <- grid::editGrob(p, grid::gPath("background"), grep = TRUE, gp = grid::gpar(fill = NA))
+ p <- ggplotify::as.ggplot(p) + ggplot2::theme(plot.margin = unit(c(0, 0, 0, 0), "pt"))
+ return(p)
+}
+```
+
+```{r plot_heatmap_of_coancestry, eval=coanc_antepops_visualization, message=FALSE, warning=FALSE, class.source='fold-show', fig.show='hide'}
+par(xpd = TRUE)
+fig_coancestry <- heatmap_coanc_antepops_wrapper(coanc_antepops_sup, tl.offset = 0.8)
+fig_coancestry <- fig_coancestry + theme(plot.margin = margin(0, 0, 0, 0, "pt"))
+coancestry_lab <- ggplot() + 
+  annotate("text", x = 0.5, y = 0.5, size = 4.5, label = "Coancestry") + 
+  xlim(0, 1) + 
+  ylim(0, 1) + 
+  theme_void()
+fig_coancestry <- ggarrange(fig_coancestry, coancestry_lab, ncol = 1, heights = c(1, 0.1))
+```
+
+```{r}
+fig_coancestry
+```
+
+We combine all plots. 
+
+```{r pop_coancestry_tgp, eval=coanc_antepops_visualization, message=FALSE, warning=FALSE, class.source='fold-show', fig.align='center', fig.width=15, fig.height=6}
+# combine plots of tree, admix props, subpops and coancestry
+design <- "
+  112
+  113
+  ##3
+"
+
+fig_coancestry + fig_tree + fig_admix + coancestry_lab + 
+  patchwork::plot_layout(
+            design = design,
+            widths = c(0.8, 0.2, 1.4), 
+            heights = c(0.7, 0.2, 0.4)) +
+  patchwork::plot_annotation(tag_levels = 'A', tag_prefix = '(', tag_suffix = ')') &
+  ggplot2::theme(plot.tag = ggplot2::element_text(color = "black", size = 21, face = 'bold'))
+```
+
+# Simulating genotypes from the structure of TGP
+
+We can simulate genotypes using the double-admixture method with the `dbl_admixture` function. It takes about an hour to run the following codes, so we're not running here.
+
+```{r sim_geno_double_admixture, eval=genotype_simulation, message=FALSE, warning=FALSE, class.source='fold-show'}
+X <- as.matrix(X)
+p_anc <- 0.5 * colMeans(X, na.rm = TRUE)
+coanc_antepops <- round(coanc_antepops, 6)
+X_sim <- dbl_admixture(p_anc, coanc_antepops, Q_hat, geno_only = TRUE)
+
+## estimate kinship
+obj         <- popkin::popkin_A(X_sim)
+A_min   <- mean(sort(obj$A[lower.tri(obj$A)])[1:100])
+kinship_sim_os  <- 1 - obj$A / A_min
+
+## mapping kinship coefficients to coancestry coefficients
+coanc_sim_os  <- popkin::inbr_diag(kinship_sim_os)
+coanc_sim_os  <- ifelse(coanc_sim_os < 0, 0, coanc_sim_os)
+save(coanc_sim_os,  file = "rdata/coanc_sim_os.rda")
+```
+
+We can also use NORTA method to simulate genotypes. It takes a few hours to run the following codes, so we're not running here.
+
+```{r sim_geno_NORTA, eval=genotype_simulation,, message=FALSE, warning=FALSE, class.source='fold-show'}
+X_sim_norta <- norta_approx(p_anc, coanc_antepops, Q_hat,
+              geno_only = TRUE, parallel = TRUE, method = "numeric", tol = 1e-5, mc_cores = 20)
+
+## estimate kinship
+obj         <- popkin::popkin_A(X_sim_norta)
+A_min   <- mean(sort(obj$A[lower.tri(obj$A)])[1:100])
+kinship_sim_os_norta  <- 1 - obj$A / A_min
+
+## mapping kinship coefficients to coancestry coefficients
+coanc_sim_os_norta    <- popkin::inbr_diag(kinship_sim_os_norta)
+coanc_sim_os_norta    <- ifelse(coanc_sim_os_norta < 0, 0, coanc_sim_os_norta)
+save(coanc_sim_os_norta,   file = "rdata/coanc_sim_os_norta.rda")
+```
+
+We plot the individual-level coancestry. 
+
+```{r indiv_coancestry_tgp, eval=TRUE, message=FALSE, warning=FALSE, class.source='fold-show', fig.height = 8, fig.width = 12, fig.align = 'center'}
+load("rdata/coanc_sim_os.rda")
+load("rdata/coanc_sim_os_norta.rda")
+
+par(mar = c(0, 0, 0, 0) + 0.2)
+layout(rbind(
+   c(14, 19, 15, 20, 16, 21,  0),
+   c( 7,  1,  0,  2,  0,  3,  6),
+   c( 0,  9,  0, 10,  0, 11,  0),
+   c(17, 22, 18, 23,  0,  0,  0),
+   c( 8,  4,  0,  5,  0,  0,  0),
+   c( 0, 12,  0, 13,  0,  0,  0)),
+  heights = c(0.2, 1, 0.22, 0.2, 1, 0.22),
+  widths  = c(0.2, 1, 0.08, 1, 0.08, 1, 0.2))
+
+coanc_sim_os       <- (coanc_sim_os - 1) * (1 - min(coanc_sup)) + 1
+coanc_sim_os_norta <- (coanc_sim_os_norta - 1) * (1 - min(coanc_sup)) + 1
+# We truncate the large entries of `coanc_std`
+# coanc_std  <- ifelse(coanc_std > max(coanc_os), max(coanc_os), coanc_std)
+
+popkin::plot_popkin(kinship = list(coanc_os[index,index], coanc_sup[index,index], coanc_std[index,index], coanc_sim_os[index,index], coanc_sim_os_norta[index,index]),
+                    layout_add = FALSE,
+                    leg_cex = 0.8,
+                    labs_text = FALSE,
+                    labs_lwd = 0.1,
+                    labs = fam$Superpopulation[index],
+                    ylab = '',
+                    leg_title = "Coancestry",
+                    panel_letters = NULL)
+
+par(mar = c(0.5, 0.5, 0.2, 0))
+plot_colors_subpops(fam$Superpopulation[index], y = TRUE, cex = 1.1)
+mtext('Individuals', side = 2, line = 0.5, xpd = NA, cex = 0.8)
+
+par(mar = c(0.5, 0.5, 0.2, 0))
+plot_colors_subpops(fam$Superpopulation[index], y = TRUE, cex = 1.1)
+mtext('Individuals', side = 2, line = 0.5, xpd = NA, cex = 0.8)
+
+par(mar = c(0, 0.5, 0, 0.2))
+plot_colors_subpops(fam$Superpopulation[index], srt = 90, cex = 1.1)
+par(mar = c(0, 0.5, 0, 0.2))
+plot_colors_subpops(fam$Superpopulation[index], srt = 90, cex = 1.1)
+par(mar = c(0, 0.5, 0, 0.2))
+plot_colors_subpops(fam$Superpopulation[index], srt = 90, cex = 1.1)
+par(mar = c(0, 0.5, 0, 0.2))
+plot_colors_subpops(fam$Superpopulation[index], srt = 90, cex = 1.1)
+par(mar = c(0, 0.5, 0, 0.2))
+plot_colors_subpops(fam$Superpopulation[index], srt = 90, cex = 1.1)
+
+par(mar = c(0, 0, 0, 0))
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.3, "(A)", cex = 2, xpd = TRUE, font = 2)
+
+par(mar = c(0, 0, 0, 0))
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.3, "(B)", cex = 2, xpd = TRUE, font = 2)
+
+par(mar = c(0, 0, 0, 0))
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.3, "(C)", cex = 2, xpd = TRUE, font = 2)
+
+par(mar = c(0, 0, 0, 0))
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.3, "(D)", cex = 2, xpd = TRUE, font = 2)
+
+par(mar = c(0, 0, 0, 0))
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.3, "(E)", cex = 2, xpd = TRUE, font = 2)
+
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.4, "OS individual coancestry\nof real data", cex = 1.6)
+
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.4, "Super admixture individual coancestry\n of real data", cex = 1.6)
+
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.4, "Standard admixture individual coancestry\n of real data", cex = 1.6)
+
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.4, "OS individual coancestry\nof bootstrap data (double-admixture)", cex = 1.6)
+
+plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+text(0.5, 0.4, "OS individual coancestry\nof bootstrap data (NORTA)", cex = 1.6)
+```
+
+# Confirming significant hypothesis tests of standard admixture versus super admixture
+
+We perform the significance test of coancestry among antecedent populations to compare the model fit between standard admixture versus super admixture. The following chunk of codes is used to generate the null distribution of the test statistics $U$. It should be noted that it takes days to run this chunk of code. We submit each iteration as a separate cluster job to speed up (not show here). Therefore, we're just showing the code but not running it. We provide the pre-computed null test statistics in the file `rdata/test_stats0.rda`.
+
+```{r compute_test_statistics, eval=FALSE, message=FALSE, warning=FALSE, class.source='fold-show'}
+for (task_id in 1:1000) {
+  ## compute null test statistics
+  inbr_antepops <- diag(est_coanc(coanc_os, Q_hat, model = "standard"))
+
+  ## compute null
+  test_stats0 <- compute_null(p_anc, Q_hat, inbr_antepops, verbose = TRUE)
+
+  # save results
+  dir.create(file.path("rdata", "test_stat0"), showWarnings = FALSE)
+  save(test_stat0, file = paste0("rdata/test_stat0/", task_id, ".rda"))
+}
+
+test_stats0 <- c()
+for (task_id in 1:1000) {
+  load(paste0("rdata/test_stat0/", task_id, ".rda"))
+  test_stats0 <- c(test_stats0, test_stat0)
+}
+save(test_stats0, file = "rdata/test_stats0.rda")
+```
+
+We plot the distribution of null test statistics and label our observed test statistics.
+
+```{r distr_of_U, eval=TRUE, message=TRUE, warning=FALSE, fig.width=5, fig.height=5, fig.align='center', class.source='fold-show'}
+load("rdata/test_stats0.rda")
+load("rdata/coanc_os.rda")
+load("rdata/Q_hat/5.rda")
+
+coanc_antepops_sup <- est_coanc(coanc_os, Q_hat, model = "super")
+coanc_antepops_std <- est_coanc(coanc_os, Q_hat, model = "standard")
+
+test_stat1 <- norm(coanc_antepops_sup - coanc_antepops_std, "F")
+p <- data.frame(test_stats0 = test_stats0) %>%
+     ggplot(data, mapping = aes(x = test_stats0)) +
+        geom_histogram(aes(y =..density..), 
+                 fill  = "dodgerblue3", 
+                 bins  = 10,
+                 binwidth = NULL,
+                 color = "black", 
+                 alpha = 0.7, 
+                 size  = 0.1) +
+    labs(x = latex2exp::TeX(r"(Null test-statistics)"), y='Density') +
+    scale_y_continuous(limits = c(0, 250)) +
+    theme_bw(base_size = 16) +
+    ggtitle("1000 Genomes (TGP)") +
+    theme(panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), 
+    plot.title = element_text(hjust = 0.5, size=16)) +
+    annotate("text", x = 0.027, y = 240, size = 6, label = latex2exp::TeX(sprintf("$U_{obs}$ = %.3f", test_stat1)))
+p
+```
+
+
+
+
+
+
+

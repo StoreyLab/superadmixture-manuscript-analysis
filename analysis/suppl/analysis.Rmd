@@ -1,0 +1,73 @@
+---
+title: "Supplementary analysis of human studies"
+author: "Danfeng Chen"
+date: "`r Sys.Date()`"
+output: 
+ rmdformats::robobook:
+    lightbox: true
+    code_folding: hide
+    self_contained: yes
+    thumbnails: false
+    use_bookdown: true
+    fig_caption: yes
+    keep_md: false
+---
+
+```{r load_packages, echo=TRUE, message=FALSE, warning=FALSE, class.source='fold-show'}
+library(knitr)
+library(tidyverse)
+library(kableExtra)
+library(superadmixture)
+```
+
+Here we provide the code for the Table D.1 in the manuscript. We define helper functions `calc_summ_stats` to calculate the summary statistics.
+
+```{r,  message=FALSE, warning=FALSE, class.source='fold-show'}
+calc_summ_stats <- function(dataset, k_antepops){
+  # load data
+  load(paste0("../", dataset, "/rdata/coanc_os.rda"))
+  load(paste0("../", dataset, "/rdata/Q_hat/", k_antepops, ".rda"))
+  
+  # calculate coancestry among antecedent populations 
+  coanc_antepops_sup <- est_coanc(coanc_os, Q_hat, model = "super")
+  coanc_antepops_std <- est_coanc(coanc_os, Q_hat, model = "standard")
+  coanc_sup <- t(Q_hat) %*% coanc_antepops_sup %*% Q_hat
+  coanc_std <- t(Q_hat) %*% coanc_antepops_std %*% Q_hat
+
+  # calculate the absolute difference between individual-level coancestry
+  dist_sup <- round(norm(coanc_os - coanc_sup, "F") / nrow(coanc_os), 3)
+  dist_std <- round(norm(coanc_os - coanc_std, "F") / nrow(coanc_os), 3)
+  summ_table1 <<- summ_table1 %>% add_row(dist_sup = dist_sup, dist_std = dist_std)
+  
+  # calculate the ratio of the difference between individual-level coancestry
+  dist_sup <- round(norm(coanc_os - coanc_sup, "F") / norm(coanc_os, "F"), 3)
+  dist_std <- round(norm(coanc_os - coanc_std, "F") / norm(coanc_os, "F"), 3)
+  summ_table2 <<- summ_table2 %>% add_row(dist_sup = dist_sup, dist_std = dist_std)
+}
+```
+
+Here we use the function defined above to generate the summary table. 
+
+```{r summary,  message=FALSE, warning=FALSE, class.source='fold-show'}
+summ_table1 <- data.frame(dist_sup = numeric(), dist_std = numeric())
+summ_table2 <- data.frame(dist_sup = numeric(), dist_std = numeric())
+
+calc_summ_stats("amr",  k_antepops = 3)
+calc_summ_stats("ind",  k_antepops = 7)
+calc_summ_stats("hgdp", k_antepops = 7)
+calc_summ_stats("ho",   k_antepops = 11)
+calc_summ_stats("tgp",  k_antepops = 5)
+```
+
+Here we use the `kable` package to print out the table in a formatted fashion.
+```{r print_summary,  message=FALSE, warning=FALSE, class.source='fold-show'}
+rownames(summ_table1) <- c("AMR from TGP", "Indian (IND) Study", "HGDP", "Human Origins (HO) Study", "TGP")
+colnames(summ_table1) <- c(r"($\frac{1}{n}\vert\vert\widehat{\Theta}^{OS} - \widehat{\Theta}^{sup}\vert\vert_F$)",
+                           r"($\frac{1}{n}\vert\vert\widehat{\Theta}^{OS} - \widehat{\Theta}^{std}\vert\vert_F$)")
+kable(summ_table1) %>% kable_material(c("striped", "hover"))
+
+rownames(summ_table2) <- c("AMR from TGP", "Indian (IND) Study", "HGDP", "Human Origins (HO) Study", "TGP")
+colnames(summ_table2) <- c(r"($\vert\vert\widehat{\Theta}^{OS} - \widehat{\Theta}^{sup}\vert\vert_F / \vert\vert\widehat{\Theta}^{OS}\vert\vert_F$)",
+                           r"($\vert\vert\widehat{\Theta}^{OS} - \widehat{\Theta}^{std}\vert\vert_F / \vert\vert\widehat{\Theta}^{OS}\vert\vert_F$)")
+kable(summ_table2) %>% kable_material(c("striped", "hover"))
+```
